@@ -49,7 +49,7 @@ static jbyteArray do_text_cmd(JNIEnv *env, const char *ctl) {
         result = (*env)->NewByteArray(env, (jsize)len);
         if (result) (*env)->SetByteArrayRegion(env, result, 0, (jsize)len, (jbyte *)err);
     } else {
-        jsize len = (rc > 0 && rc < buflen) ? (jsize)rc : (jsize)strlen(buf);
+        jsize len = (jsize)strlen(buf);
         result = (*env)->NewByteArray(env, len);
         if (result) (*env)->SetByteArrayRegion(env, result, 0, len, (jbyte *)buf);
     }
