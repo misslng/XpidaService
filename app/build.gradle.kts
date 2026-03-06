@@ -10,6 +10,8 @@ android {
         }
     }
 
+    ndkVersion = "29.0.14206865"
+
     defaultConfig {
         applicationId = "com.xp.xpidaservice"
         minSdk = 24

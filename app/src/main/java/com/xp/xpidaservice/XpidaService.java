@@ -9,7 +9,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
 
@@ -25,8 +27,8 @@ public class XpidaService extends Service implements XpidaTcpServer.StatusListen
     private static final String TAG = "XpidaService";
     private static final String CHANNEL_ID = "xpida_service_channel";
     private static final int NOTIFICATION_ID = 1;
-
     private static final String ACTION_STOP = "com.xp.xpidaservice.STOP";
+    private static final long STATS_INTERVAL_MS = 1000;
 
     private XpidaTcpServer tcpServer;
     private XpidaCommandExecutor commandExecutor;
@@ -34,8 +36,34 @@ public class XpidaService extends Service implements XpidaTcpServer.StatusListen
     private WifiManager.WifiLock wifiLock;
     private NotificationManager notificationManager;
 
-    private String currentStatus = "初始化中...";
+    private String currentStatus = "初始化中";
+    private String currentListenAddr = null;
     private int currentClients = 0;
+
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private long lastBytesSent = 0;
+    private long lastBytesReceived = 0;
+    private long sendSpeed = 0;
+    private long recvSpeed = 0;
+
+    private final Runnable statsUpdater = new Runnable() {
+        @Override
+        public void run() {
+            if (tcpServer == null || !tcpServer.isRunning()) return;
+
+            long sent = tcpServer.getTotalBytesSent();
+            long received = tcpServer.getTotalBytesReceived();
+
+            sendSpeed = sent - lastBytesSent;
+            recvSpeed = received - lastBytesReceived;
+
+            lastBytesSent = sent;
+            lastBytesReceived = received;
+
+            updateNotification();
+            handler.postDelayed(this, STATS_INTERVAL_MS);
+        }
+    };
 
     @Override
     public void onCreate() {
@@ -65,6 +93,7 @@ public class XpidaService extends Service implements XpidaTcpServer.StatusListen
     @Override
     public void onDestroy() {
         Log.i(TAG, "Service onDestroy");
+        handler.removeCallbacks(statsUpdater);
         if (tcpServer != null) {
             tcpServer.stop();
         }
@@ -94,13 +123,25 @@ public class XpidaService extends Service implements XpidaTcpServer.StatusListen
     @Override
     public void onServerStarted(int port) {
         String ip = getLocalIpAddress();
-        currentStatus = "监听中 " + ip + ":" + port;
+        currentListenAddr = ip + ":" + port;
+        currentStatus = "运行中";
+
+        lastBytesSent = 0;
+        lastBytesReceived = 0;
+        sendSpeed = 0;
+        recvSpeed = 0;
+        handler.postDelayed(statsUpdater, STATS_INTERVAL_MS);
+
         updateNotification();
     }
 
     @Override
     public void onServerStopped() {
         currentStatus = "已停止";
+        currentListenAddr = null;
+        handler.removeCallbacks(statsUpdater);
+        sendSpeed = 0;
+        recvSpeed = 0;
         updateNotification();
     }
 
@@ -147,20 +188,34 @@ public class XpidaService extends Service implements XpidaTcpServer.StatusListen
         PendingIntent stopPi = PendingIntent.getService(this, 0, stopIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        String text = currentStatus;
-        if (currentClients > 0) {
-            text += " | 连接数: " + currentClients;
+        String title = "Xpida · " + currentStatus;
+
+        String contentText;
+        if ("运行中".equals(currentStatus)) {
+            String speedText = "↑ " + formatSpeed(sendSpeed) + "  ↓ " + formatSpeed(recvSpeed);
+            if (currentClients > 0) {
+                contentText = currentClients + " 连接 | " + speedText;
+            } else {
+                contentText = speedText;
+            }
+        } else {
+            contentText = currentClients > 0 ? currentClients + " 连接" : "";
         }
 
-        return new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("Xpida Service")
-                .setContentText(text)
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle(title)
+                .setContentText(contentText)
                 .setSmallIcon(R.drawable.ic_notification)
                 .setOngoing(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .addAction(R.drawable.ic_stop, "停止", stopPi)
-                .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-                .build();
+                .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE);
+
+        if (currentListenAddr != null) {
+            builder.setSubText(currentListenAddr);
+        }
+
+        return builder.build();
     }
 
     private void updateNotification() {
@@ -190,6 +245,15 @@ public class XpidaService extends Service implements XpidaTcpServer.StatusListen
 
     // --- Util ---
 
+    private String formatSpeed(long bytesPerSec) {
+        if (bytesPerSec < 1024) return bytesPerSec + " B/s";
+        if (bytesPerSec < 1024 * 1024)
+            return String.format("%.1f KB/s", bytesPerSec / 1024.0);
+        if (bytesPerSec < 1024L * 1024 * 1024)
+            return String.format("%.1f MB/s", bytesPerSec / (1024.0 * 1024));
+        return String.format("%.1f GB/s", bytesPerSec / (1024.0 * 1024 * 1024));
+    }
+
     private String getLocalIpAddress() {
         try {
             List<NetworkInterface> interfaces = Collections.list(NetworkInterface.getNetworkInterfaces());
@@ -197,7 +261,7 @@ public class XpidaService extends Service implements XpidaTcpServer.StatusListen
                 if (ni.isLoopback() || !ni.isUp()) continue;
                 List<InetAddress> addrs = Collections.list(ni.getInetAddresses());
                 for (InetAddress addr : addrs) {
-                    if (addr.getHostAddress().contains(":")) continue; // skip IPv6
+                    if (addr.getHostAddress().contains(":")) continue;
                     String ip = addr.getHostAddress();
                     if (ip != null && !ip.startsWith("127.")) return ip;
                 }

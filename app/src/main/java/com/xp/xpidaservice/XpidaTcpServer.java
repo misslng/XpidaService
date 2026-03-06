@@ -12,6 +12,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class XpidaTcpServer {
 
@@ -32,6 +33,8 @@ public class XpidaTcpServer {
     private final StatusListener listener;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicInteger clientCount = new AtomicInteger(0);
+    private final AtomicLong totalBytesReceived = new AtomicLong(0);
+    private final AtomicLong totalBytesSent = new AtomicLong(0);
     private ServerSocket serverSocket;
     private ExecutorService threadPool;
 
@@ -73,6 +76,14 @@ public class XpidaTcpServer {
         return clientCount.get();
     }
 
+    public long getTotalBytesReceived() {
+        return totalBytesReceived.get();
+    }
+
+    public long getTotalBytesSent() {
+        return totalBytesSent.get();
+    }
+
     private void serverLoop() {
         try {
             serverSocket = new ServerSocket();
@@ -86,7 +97,7 @@ public class XpidaTcpServer {
                 try {
                     Socket client = serverSocket.accept();
                     client.setTcpNoDelay(true);
-                    client.setSoTimeout(300_000); // 5 min read timeout
+                    client.setSoTimeout(300_000);
                     threadPool.execute(() -> handleClient(client));
                 } catch (IOException e) {
                     if (running.get()) {
@@ -123,6 +134,8 @@ public class XpidaTcpServer {
                     break;
                 }
 
+                totalBytesReceived.addAndGet(XpidaProtocol.HEADER_SIZE + req.payload.length);
+
                 Log.d(TAG, String.format("REQ cmd=0x%02x seq=%d payload=%d bytes from %s",
                         req.cmd, req.seq, req.payload.length, addr));
 
@@ -130,7 +143,7 @@ public class XpidaTcpServer {
                     processDumpStreaming(req, out);
                 } else {
                     XpidaProtocol.Response resp = processRequest(req);
-                    XpidaProtocol.writeResponse(out, resp);
+                    sendResponse(out, resp);
 
                     Log.d(TAG, String.format("RSP status=0x%02x seq=%d payload=%d bytes to %s",
                             resp.status, resp.seq, resp.payload.length, addr));
@@ -153,8 +166,7 @@ public class XpidaTcpServer {
         String args = req.payloadAsString();
         String[] parts = args.trim().split("\\s+");
         if (parts.length < 3) {
-            XpidaProtocol.writeResponse(out,
-                    XpidaProtocol.makeFail(req.seq, "dump requires: pid hex_start hex_end"));
+            sendResponse(out, XpidaProtocol.makeFail(req.seq, "dump requires: pid hex_start hex_end"));
             return;
         }
 
@@ -165,14 +177,12 @@ public class XpidaTcpServer {
             start = Long.parseUnsignedLong(parts[1], 16);
             end = Long.parseUnsignedLong(parts[2], 16);
         } catch (NumberFormatException e) {
-            XpidaProtocol.writeResponse(out,
-                    XpidaProtocol.makeFail(req.seq, "bad dump args: " + e.getMessage()));
+            sendResponse(out, XpidaProtocol.makeFail(req.seq, "bad dump args: " + e.getMessage()));
             return;
         }
 
         if (end <= start) {
-            XpidaProtocol.writeResponse(out,
-                    XpidaProtocol.makeFail(req.seq, "bad range: end <= start"));
+            sendResponse(out, XpidaProtocol.makeFail(req.seq, "bad range: end <= start"));
             return;
         }
 
@@ -184,21 +194,25 @@ public class XpidaTcpServer {
             byte[] data = XpidaNative.dumpChunk(pid, cur, nxt);
 
             if (data == null || data.length == 0) {
-                XpidaProtocol.writeResponse(out,
-                        XpidaProtocol.makeFail(req.seq, "dump chunk failed at 0x" + Long.toHexString(cur)));
+                sendResponse(out, XpidaProtocol.makeFail(req.seq,
+                        "dump chunk failed at 0x" + Long.toHexString(cur)));
                 return;
             }
 
             boolean lastChunk = (nxt >= end);
             byte status = lastChunk ? XpidaProtocol.STATUS_OK : XpidaProtocol.STATUS_MORE;
-            XpidaProtocol.writeResponse(out,
-                    new XpidaProtocol.Response(status, req.seq, data));
+            sendResponse(out, new XpidaProtocol.Response(status, req.seq, data));
 
             Log.d(TAG, String.format("DUMP chunk %x-%x: %d bytes, status=%s",
                     cur, nxt, data.length, lastChunk ? "OK(final)" : "MORE"));
 
             cur = nxt;
         }
+    }
+
+    private void sendResponse(DataOutputStream out, XpidaProtocol.Response resp) throws IOException {
+        XpidaProtocol.writeResponse(out, resp);
+        totalBytesSent.addAndGet(XpidaProtocol.HEADER_SIZE + resp.payload.length);
     }
 
     private XpidaProtocol.Response processRequest(XpidaProtocol.Request req) {
