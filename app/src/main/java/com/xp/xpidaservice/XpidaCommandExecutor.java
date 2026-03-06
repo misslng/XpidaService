@@ -21,22 +21,15 @@ public class XpidaCommandExecutor {
     public Result execute(byte cmd, String args) {
         try {
             switch (cmd) {
-                case XpidaProtocol.CMD_PING: {
-                    String r = XpidaNative.ping();
-                    return textResult(r);
-                }
-                case XpidaProtocol.CMD_PS: {
-                    String r = XpidaNative.ps();
-                    return textResult(r);
-                }
-                case XpidaProtocol.CMD_FIND: {
-                    String r = XpidaNative.find(args);
-                    return textResult(r);
-                }
+                case XpidaProtocol.CMD_PING:
+                    return byteResult(XpidaNative.ping());
+                case XpidaProtocol.CMD_PS:
+                    return byteResult(XpidaNative.ps());
+                case XpidaProtocol.CMD_FIND:
+                    return byteResult(XpidaNative.find(args));
                 case XpidaProtocol.CMD_MAPS: {
                     int pid = parseFirstInt(args);
-                    String r = XpidaNative.maps(pid);
-                    return textResult(r);
+                    return byteResult(XpidaNative.maps(pid));
                 }
                 case XpidaProtocol.CMD_READ: {
                     String[] parts = args.trim().split("\\s+");
@@ -53,7 +46,6 @@ public class XpidaCommandExecutor {
                     return new Result(false, "read returned null".getBytes(), false);
                 }
                 case XpidaProtocol.CMD_DUMP:
-                    // dump is handled via streaming in XpidaTcpServer, not here
                     return new Result(false, "dump must be handled via streaming".getBytes(), false);
                 default:
                     return new Result(false, ("Unknown cmd: 0x" + Integer.toHexString(cmd & 0xFF)).getBytes(), false);
@@ -65,14 +57,15 @@ public class XpidaCommandExecutor {
         }
     }
 
-    private Result textResult(String r) {
-        if (r == null) {
+    private Result byteResult(byte[] data) {
+        if (data == null || data.length == 0) {
             return new Result(false, "native returned null".getBytes(), false);
         }
-        if (r.startsWith("ERROR:")) {
-            return new Result(false, r.getBytes(), false);
+        String preview = new String(data, 0, Math.min(data.length, 6));
+        if (preview.startsWith("ERROR:")) {
+            return new Result(false, data, false);
         }
-        return new Result(true, r.getBytes(), false);
+        return new Result(true, data, false);
     }
 
     private int parseFirstInt(String s) {

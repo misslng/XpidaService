@@ -10,135 +10,89 @@
 
 #define TAG "XpidaNative"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 #define XPIDA_NR     282
 #define XPIDA_MAGIC  0x7870696461ULL
 
-#define MAX_TEXT_BUF  (512 * 1024)
+#define MAX_TEXT_BUF  (1 * 1024 * 1024)
 #define MAX_BIN_BUF   (64 * 1024 * 1024 + 4096)
 #define DUMP_CHUNK    (64ULL * 1024 * 1024)
 
-/*
- * Core syscall wrapper: syscall(282, magic, ctl_string, output_buf, buf_len)
- * Returns: rc from kernel (bytes written on success, negative on error)
- */
 static long xpida_call(const char *ctl, char *buf, int buflen) {
     return syscall(XPIDA_NR, XPIDA_MAGIC, ctl, buf, (long)buflen);
 }
 
-/* ---------- ping ---------- */
-
-JNIEXPORT jstring JNICALL
-Java_com_xp_xpidaservice_XpidaNative_ping(JNIEnv *env, jclass clazz) {
-    int buflen = MAX_TEXT_BUF;
-    char *buf = (char *)mmap(NULL, buflen, PROT_READ | PROT_WRITE,
-                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (buf == MAP_FAILED) return (*env)->NewStringUTF(env, "ERROR: mmap failed");
-    buf[0] = '\0';
-
-    long rc = xpida_call("ping", buf, buflen);
-
-    jstring result;
-    if (rc < 0) {
-        char err[128];
-        snprintf(err, sizeof(err), "ERROR: rc=%ld", rc);
-        result = (*env)->NewStringUTF(env, err);
-    } else {
-        result = (*env)->NewStringUTF(env, buf);
-    }
-
-    munmap(buf, buflen);
-    return result;
-}
-
-/* ---------- ps ---------- */
-
-JNIEXPORT jstring JNICALL
-Java_com_xp_xpidaservice_XpidaNative_ps(JNIEnv *env, jclass clazz) {
-    int buflen = MAX_TEXT_BUF;
-    char *buf = (char *)mmap(NULL, buflen, PROT_READ | PROT_WRITE,
-                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (buf == MAP_FAILED) return (*env)->NewStringUTF(env, "ERROR: mmap failed");
-    buf[0] = '\0';
-
-    long rc = xpida_call("ps", buf, buflen);
-
-    jstring result;
-    if (rc < 0) {
-        char err[128];
-        snprintf(err, sizeof(err), "ERROR: rc=%ld", rc);
-        result = (*env)->NewStringUTF(env, err);
-    } else {
-        result = (*env)->NewStringUTF(env, buf);
-    }
-
-    munmap(buf, buflen);
-    return result;
-}
-
-/* ---------- find <name> ---------- */
-
-JNIEXPORT jstring JNICALL
-Java_com_xp_xpidaservice_XpidaNative_find(JNIEnv *env, jclass clazz, jstring name) {
-    const char *cname = (*env)->GetStringUTFChars(env, name, NULL);
-    if (!cname) return (*env)->NewStringUTF(env, "ERROR: null name");
-
+/*
+ * All text commands return byte[] instead of jstring.
+ * This avoids NewStringUTF which requires null-terminated Modified UTF-8
+ * and crashes on large or binary-containing output.
+ */
+static jbyteArray do_text_cmd(JNIEnv *env, const char *ctl) {
     int buflen = MAX_TEXT_BUF;
     char *buf = (char *)mmap(NULL, buflen, PROT_READ | PROT_WRITE,
                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (buf == MAP_FAILED) {
-        (*env)->ReleaseStringUTFChars(env, name, cname);
-        return (*env)->NewStringUTF(env, "ERROR: mmap failed");
+        const char *err = "ERROR: mmap failed";
+        jbyteArray r = (*env)->NewByteArray(env, (jsize)strlen(err));
+        if (r) (*env)->SetByteArrayRegion(env, r, 0, (jsize)strlen(err), (jbyte *)err);
+        return r;
     }
     buf[0] = '\0';
+
+    long rc = xpida_call(ctl, buf, buflen);
+
+    jbyteArray result;
+    if (rc < 0) {
+        char err[128];
+        int len = snprintf(err, sizeof(err), "ERROR: rc=%ld", rc);
+        result = (*env)->NewByteArray(env, (jsize)len);
+        if (result) (*env)->SetByteArrayRegion(env, result, 0, (jsize)len, (jbyte *)err);
+    } else {
+        jsize len = (rc > 0 && rc < buflen) ? (jsize)rc : (jsize)strlen(buf);
+        result = (*env)->NewByteArray(env, len);
+        if (result) (*env)->SetByteArrayRegion(env, result, 0, len, (jbyte *)buf);
+    }
+
+    munmap(buf, buflen);
+    return result;
+}
+
+/* ---------- ping ---------- */
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_xp_xpidaservice_XpidaNative_ping(JNIEnv *env, jclass clazz) {
+    return do_text_cmd(env, "ping");
+}
+
+/* ---------- ps ---------- */
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_xp_xpidaservice_XpidaNative_ps(JNIEnv *env, jclass clazz) {
+    return do_text_cmd(env, "ps");
+}
+
+/* ---------- find <name> ---------- */
+
+JNIEXPORT jbyteArray JNICALL
+Java_com_xp_xpidaservice_XpidaNative_find(JNIEnv *env, jclass clazz, jstring name) {
+    const char *cname = (*env)->GetStringUTFChars(env, name, NULL);
+    if (!cname) return NULL;
 
     char ctl[512];
     snprintf(ctl, sizeof(ctl), "find %s", cname);
     (*env)->ReleaseStringUTFChars(env, name, cname);
 
-    long rc = xpida_call(ctl, buf, buflen);
-
-    jstring result;
-    if (rc < 0) {
-        char err[128];
-        snprintf(err, sizeof(err), "ERROR: rc=%ld", rc);
-        result = (*env)->NewStringUTF(env, err);
-    } else {
-        result = (*env)->NewStringUTF(env, buf);
-    }
-
-    munmap(buf, buflen);
-    return result;
+    return do_text_cmd(env, ctl);
 }
 
 /* ---------- maps <pid> ---------- */
 
-JNIEXPORT jstring JNICALL
+JNIEXPORT jbyteArray JNICALL
 Java_com_xp_xpidaservice_XpidaNative_maps(JNIEnv *env, jclass clazz, jint pid) {
-    int buflen = MAX_TEXT_BUF;
-    char *buf = (char *)mmap(NULL, buflen, PROT_READ | PROT_WRITE,
-                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (buf == MAP_FAILED) return (*env)->NewStringUTF(env, "ERROR: mmap failed");
-    buf[0] = '\0';
-
     char ctl[256];
     snprintf(ctl, sizeof(ctl), "maps %d", pid);
-
-    long rc = xpida_call(ctl, buf, buflen);
-
-    jstring result;
-    if (rc < 0) {
-        char err[128];
-        snprintf(err, sizeof(err), "ERROR: rc=%ld", rc);
-        result = (*env)->NewStringUTF(env, err);
-    } else {
-        result = (*env)->NewStringUTF(env, buf);
-    }
-
-    munmap(buf, buflen);
-    return result;
+    return do_text_cmd(env, ctl);
 }
 
 /* ---------- read <pid> <hex_addr> <size> -> byte[] ---------- */
@@ -161,19 +115,14 @@ Java_com_xp_xpidaservice_XpidaNative_readMem(JNIEnv *env, jclass clazz,
     jbyteArray result = NULL;
     if (rc > 0) {
         result = (*env)->NewByteArray(env, (jsize)rc);
-        if (result) {
-            (*env)->SetByteArrayRegion(env, result, 0, (jsize)rc, (jbyte *)buf);
-        }
+        if (result) (*env)->SetByteArrayRegion(env, result, 0, (jsize)rc, (jbyte *)buf);
     }
 
     munmap(buf, buflen);
     return result;
 }
 
-/* ---------- dumpChunk: single syscall, max DUMP_CHUNK bytes ----------
- * Java layer calls this in a loop to stream chunks over TCP.
- * start/end range must be <= DUMP_CHUNK (64MB).
- */
+/* ---------- dumpChunk: single syscall, max DUMP_CHUNK bytes ---------- */
 
 JNIEXPORT jbyteArray JNICALL
 Java_com_xp_xpidaservice_XpidaNative_dumpChunk(JNIEnv *env, jclass clazz,
@@ -199,61 +148,29 @@ Java_com_xp_xpidaservice_XpidaNative_dumpChunk(JNIEnv *env, jclass clazz,
     jbyteArray result = NULL;
     if (rc > 0) {
         result = (*env)->NewByteArray(env, (jsize)rc);
-        if (result) {
-            (*env)->SetByteArrayRegion(env, result, 0, (jsize)rc, (jbyte *)buf);
-        }
+        if (result) (*env)->SetByteArrayRegion(env, result, 0, (jsize)rc, (jbyte *)buf);
     }
 
     munmap(buf, buflen);
     return result;
 }
 
-/* ---------- generic text command (for extensibility) ---------- */
-
-JNIEXPORT jstring JNICALL
-Java_com_xp_xpidaservice_XpidaNative_rawTextCommand(JNIEnv *env, jclass clazz, jstring ctlStr) {
-    const char *ctl = (*env)->GetStringUTFChars(env, ctlStr, NULL);
-    if (!ctl) return (*env)->NewStringUTF(env, "ERROR: null ctl");
-
-    int buflen = MAX_TEXT_BUF;
-    char *buf = (char *)mmap(NULL, buflen, PROT_READ | PROT_WRITE,
-                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (buf == MAP_FAILED) {
-        (*env)->ReleaseStringUTFChars(env, ctlStr, ctl);
-        return (*env)->NewStringUTF(env, "ERROR: mmap failed");
-    }
-    buf[0] = '\0';
-
-    long rc = xpida_call(ctl, buf, buflen);
-    (*env)->ReleaseStringUTFChars(env, ctlStr, ctl);
-
-    jstring result;
-    if (rc < 0) {
-        char err[128];
-        snprintf(err, sizeof(err), "ERROR: rc=%ld", rc);
-        result = (*env)->NewStringUTF(env, err);
-    } else {
-        result = (*env)->NewStringUTF(env, buf);
-    }
-
-    munmap(buf, buflen);
-    return result;
-}
-
-/* ---------- generic binary command (for extensibility) ---------- */
+/* ---------- rawCommand: unified entry, always returns byte[] ---------- */
 
 JNIEXPORT jbyteArray JNICALL
-Java_com_xp_xpidaservice_XpidaNative_rawBinaryCommand(JNIEnv *env, jclass clazz, jstring ctlStr) {
+Java_com_xp_xpidaservice_XpidaNative_rawCommand(JNIEnv *env, jclass clazz,
+                                                  jstring ctlStr, jint maxBuf) {
     const char *ctl = (*env)->GetStringUTFChars(env, ctlStr, NULL);
     if (!ctl) return NULL;
 
-    int buflen = MAX_BIN_BUF;
+    int buflen = maxBuf > 0 ? maxBuf : MAX_TEXT_BUF;
     char *buf = (char *)mmap(NULL, buflen, PROT_READ | PROT_WRITE,
                              MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (buf == MAP_FAILED) {
         (*env)->ReleaseStringUTFChars(env, ctlStr, ctl);
         return NULL;
     }
+    buf[0] = '\0';
 
     long rc = xpida_call(ctl, buf, buflen);
     (*env)->ReleaseStringUTFChars(env, ctlStr, ctl);
@@ -261,8 +178,12 @@ Java_com_xp_xpidaservice_XpidaNative_rawBinaryCommand(JNIEnv *env, jclass clazz,
     jbyteArray result = NULL;
     if (rc > 0) {
         result = (*env)->NewByteArray(env, (jsize)rc);
-        if (result) {
-            (*env)->SetByteArrayRegion(env, result, 0, (jsize)rc, (jbyte *)buf);
+        if (result) (*env)->SetByteArrayRegion(env, result, 0, (jsize)rc, (jbyte *)buf);
+    } else {
+        jsize len = (jsize)strlen(buf);
+        if (len > 0) {
+            result = (*env)->NewByteArray(env, len);
+            if (result) (*env)->SetByteArrayRegion(env, result, 0, len, (jbyte *)buf);
         }
     }
 
