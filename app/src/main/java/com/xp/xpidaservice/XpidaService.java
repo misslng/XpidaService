@@ -28,7 +28,7 @@ public class XpidaService extends Service implements XpidaTcpServer.StatusListen
     private static final String CHANNEL_ID = "xpida_service_channel";
     private static final int NOTIFICATION_ID = 1;
     private static final String ACTION_STOP = "com.xp.xpidaservice.STOP";
-    private static final long STATS_INTERVAL_MS = 1000;
+    private static final long STATS_INTERVAL_MS = 2000;
 
     private XpidaTcpServer tcpServer;
     private XpidaCommandExecutor commandExecutor;
@@ -49,16 +49,18 @@ public class XpidaService extends Service implements XpidaTcpServer.StatusListen
     private final Runnable statsUpdater = new Runnable() {
         @Override
         public void run() {
-            if (tcpServer == null || !tcpServer.isRunning()) return;
+            if (tcpServer != null && tcpServer.isRunning()) {
+                long sent = tcpServer.getTotalBytesSent();
+                long received = tcpServer.getTotalBytesReceived();
 
-            long sent = tcpServer.getTotalBytesSent();
-            long received = tcpServer.getTotalBytesReceived();
+                long intervalSec = STATS_INTERVAL_MS / 1000;
+                if (intervalSec < 1) intervalSec = 1;
+                sendSpeed = (sent - lastBytesSent) / intervalSec;
+                recvSpeed = (received - lastBytesReceived) / intervalSec;
 
-            sendSpeed = sent - lastBytesSent;
-            recvSpeed = received - lastBytesReceived;
-
-            lastBytesSent = sent;
-            lastBytesReceived = received;
+                lastBytesSent = sent;
+                lastBytesReceived = received;
+            }
 
             updateNotification();
             handler.postDelayed(this, STATS_INTERVAL_MS);
@@ -118,31 +120,35 @@ public class XpidaService extends Service implements XpidaTcpServer.StatusListen
         super.onTaskRemoved(rootIntent);
     }
 
-    // --- StatusListener callbacks ---
+    // --- StatusListener callbacks (called from TCP threads, post to main) ---
 
     @Override
     public void onServerStarted(int port) {
-        String ip = getLocalIpAddress();
-        currentListenAddr = ip + ":" + port;
-        currentStatus = "运行中";
+        handler.post(() -> {
+            String ip = getLocalIpAddress();
+            currentListenAddr = ip + ":" + port;
+            currentStatus = "运行中";
 
-        lastBytesSent = 0;
-        lastBytesReceived = 0;
-        sendSpeed = 0;
-        recvSpeed = 0;
-        handler.postDelayed(statsUpdater, STATS_INTERVAL_MS);
+            lastBytesSent = 0;
+            lastBytesReceived = 0;
+            sendSpeed = 0;
+            recvSpeed = 0;
+            handler.postDelayed(statsUpdater, STATS_INTERVAL_MS);
 
-        updateNotification();
+            updateNotification();
+        });
     }
 
     @Override
     public void onServerStopped() {
-        currentStatus = "已停止";
-        currentListenAddr = null;
-        handler.removeCallbacks(statsUpdater);
-        sendSpeed = 0;
-        recvSpeed = 0;
-        updateNotification();
+        handler.post(() -> {
+            currentStatus = "已停止";
+            currentListenAddr = null;
+            handler.removeCallbacks(statsUpdater);
+            sendSpeed = 0;
+            recvSpeed = 0;
+            updateNotification();
+        });
     }
 
     @Override
@@ -157,14 +163,18 @@ public class XpidaService extends Service implements XpidaTcpServer.StatusListen
 
     @Override
     public void onError(String message) {
-        currentStatus = "错误: " + message;
-        updateNotification();
+        handler.post(() -> {
+            currentStatus = "错误: " + message;
+            updateNotification();
+        });
     }
 
     @Override
     public void onConnectionCountChanged(int count) {
-        currentClients = count;
-        updateNotification();
+        handler.post(() -> {
+            currentClients = count;
+            updateNotification();
+        });
     }
 
     // --- Notification ---
@@ -207,8 +217,11 @@ public class XpidaService extends Service implements XpidaTcpServer.StatusListen
                 .setContentText(contentText)
                 .setSmallIcon(R.drawable.ic_notification)
                 .setOngoing(true)
+                .setOnlyAlertOnce(true)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .addAction(R.drawable.ic_stop, "停止", stopPi)
+                .setWhen(System.currentTimeMillis())
+                .setShowWhen(false)
                 .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE);
 
         if (currentListenAddr != null) {
