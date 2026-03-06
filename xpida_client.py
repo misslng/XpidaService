@@ -217,7 +217,13 @@ def main():
             addr = int(sys.argv[4], 16)
             size = int(sys.argv[5])
             data = client.read_memory(pid, addr, size)
-            sys.stdout.buffer.write(data)
+            def hexdump(data, base_addr):
+                        for i in range(0, len(data), 16):
+                            hex_part = ' '.join(f'{b:02x}' for b in data[i:i+16])
+                            ascii_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in data[i:i+16])
+                            print(f'{base_addr+i:08x}  {hex_part:<48}  |{ascii_part}|')
+
+            hexdump(data, addr)
             print(f"\n[{len(data)} bytes read]", file=sys.stderr)
 
         elif cmd_name == "dump":
