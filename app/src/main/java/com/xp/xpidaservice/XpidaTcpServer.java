@@ -139,14 +139,24 @@ public class XpidaTcpServer {
                 Log.d(TAG, String.format("REQ cmd=0x%02x seq=%d payload=%d bytes from %s",
                         req.cmd, req.seq, req.payload.length, addr));
 
-                if (req.cmd == XpidaProtocol.CMD_DUMP) {
-                    processDumpStreaming(req, out);
-                } else {
-                    XpidaProtocol.Response resp = processRequest(req);
-                    sendResponse(out, resp);
+                try {
+                    if (req.cmd == XpidaProtocol.CMD_DUMP) {
+                        processDumpStreaming(req, out);
+                    } else {
+                        XpidaProtocol.Response resp = processRequest(req);
+                        sendResponse(out, resp);
 
-                    Log.d(TAG, String.format("RSP status=0x%02x seq=%d payload=%d bytes to %s",
-                            resp.status, resp.seq, resp.payload.length, addr));
+                        Log.d(TAG, String.format("RSP status=0x%02x seq=%d payload=%d bytes to %s",
+                                resp.status, resp.seq, resp.payload.length, addr));
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "Request processing error from " + addr, e);
+                    try {
+                        XpidaProtocol.writeResponse(out,
+                                XpidaProtocol.makeFail(req.seq, "Server error: " + e.getMessage()));
+                    } catch (IOException ignored) {
+                        break;
+                    }
                 }
             }
         } catch (IOException e) {
